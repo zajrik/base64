@@ -28,7 +28,7 @@ const Base64 = struct {
     /// Returns the base64 decimal index for the given `char`, or `null` for `'='`.
     fn decodeChar(char: u8) ?u6 {
         return for (table, 0..) |c, i| {
-            if (c == char) break @as(u6, @truncate(i));
+            if (c == char) break @intCast(i);
         } else null;
     }
 
