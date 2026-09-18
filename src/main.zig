@@ -13,21 +13,34 @@ const expectEqualDeep = std.testing.expectEqualDeep;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const Base64 = struct {
-    /// All base64 characters, effectively mapping base64 decimal representations
-    /// (0 through 63) to their base64 encoded representation.
-    const table: *const [64]u8 =
+    const CharSet: type = *const [64]u8;
+    const Mode: type = enum { default, url_safe };
+
+    /// Indexable set of all base64 characters.
+    const chars_default: CharSet =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ++
         "abcdefghijklmnopqrstuvwxyz" ++
         "0123456789+/";
 
+    /// URL-safe base64 character set.
+    const chars_url_safe: CharSet = chars_default[0..62] ++ "-_";
+
     /// Returns the base64 encoded character for the given decimal `index` (`0`-`63`).
-    fn charAt(index: u6) u8 {
-        return table[index];
+    fn charAt(index: u6, mode: Mode) u8 {
+        return switch (mode) {
+            .default => chars_default[index],
+            .url_safe => chars_url_safe[index],
+        };
     }
 
     /// Returns the base64 decimal index for the given `char`, or `null` for `'='`.
-    fn decodeChar(char: u8) ?u6 {
-        return for (table, 0..) |c, i| {
+    fn decodeChar(char: u8, mode: Mode) ?u6 {
+        const char_set: CharSet = switch (mode) {
+            .default => chars_default,
+            .url_safe => chars_url_safe,
+        };
+
+        return for (char_set, 0..) |c, i| {
             if (c == char) break @intCast(i);
         } else null;
     }
@@ -35,7 +48,7 @@ const Base64 = struct {
     /// Convert the given `data` to a base64-encoded string.
     ///
     /// Returns the encoded string.
-    pub fn encode(alloc: Allocator, data: []const u8) ![]const u8 {
+    pub fn encode(alloc: Allocator, data: []const u8, mode: Mode) ![]const u8 {
         if (data.len == 0) return "";
 
         var out: ArrayList(u8) = .empty;
@@ -45,7 +58,7 @@ const Base64 = struct {
             var chunk: [3]u8 = @splat(0);
             @memcpy(chunk[0..it.len], it);
 
-            const segment: EncodedBase64Segment = .encode(&chunk);
+            const segment: EncodedBase64Segment = .encode(&chunk, mode);
 
             switch (it.len) {
                 3 => try out.appendSlice(alloc, &.{
@@ -80,7 +93,7 @@ const Base64 = struct {
     /// `data` must be at least 4 bytes.
     ///
     /// Returns the decoded bytes.
-    pub fn decode(alloc: Allocator, data: []const u8) ![]const u8 {
+    pub fn decode(alloc: Allocator, data: []const u8, mode: Mode) ![]const u8 {
         if (data.len < 4) return error.InvalidInput;
 
         var out: ArrayList(u8) = .empty;
@@ -90,7 +103,7 @@ const Base64 = struct {
             var chunk: [4]u8 = @splat(0);
             @memcpy(chunk[0..it.len], it);
 
-            const segment: DecodedBase64Segment = .decode(&chunk);
+            const segment: DecodedBase64Segment = .decode(&chunk, mode);
 
             try out.append(alloc, segment.@"0");
             if (segment.@"1" > 0) try out.append(alloc, segment.@"1");
@@ -112,7 +125,7 @@ const EncodedBase64Segment = packed struct(u32) {
     const Indices = packed struct(u24) { @"3": u6, @"2": u6, @"1": u6, @"0": u6 };
 
     /// Convert the given chunk of bytes into an `EncodedBase64Segment`.
-    pub fn encode(chunk: *const [3]u8) EncodedBase64Segment {
+    pub fn encode(chunk: *const [3]u8, mode: Base64.Mode) EncodedBase64Segment {
         const segment: u24 =
             @as(u24, chunk[0]) << 16 |
             @as(u16, chunk[1]) << 8 |
@@ -121,10 +134,10 @@ const EncodedBase64Segment = packed struct(u32) {
         const indices: Indices = @bitCast(segment);
 
         return .{
-            .@"0" = Base64.charAt(indices.@"0"),
-            .@"1" = Base64.charAt(indices.@"1"),
-            .@"2" = Base64.charAt(indices.@"2"),
-            .@"3" = Base64.charAt(indices.@"3"),
+            .@"0" = Base64.charAt(indices.@"0", mode),
+            .@"1" = Base64.charAt(indices.@"1", mode),
+            .@"2" = Base64.charAt(indices.@"2", mode),
+            .@"3" = Base64.charAt(indices.@"3", mode),
         };
     }
 };
@@ -136,11 +149,11 @@ const DecodedBase64Segment = packed struct(u24) {
     @"0": u8,
 
     /// Decode the given chunk of base64-encoded bytes.
-    pub fn decode(chunk: *const [4]u8) DecodedBase64Segment {
+    pub fn decode(chunk: *const [4]u8, mode: Base64.Mode) DecodedBase64Segment {
         var chars: [4]u6 = undefined;
 
         for (chunk, 0..) |char, i| {
-            chars[i] = Base64.decodeChar(char) orelse 0;
+            chars[i] = Base64.decodeChar(char, mode) orelse 0;
         }
 
         const segment: u24 =
@@ -156,8 +169,8 @@ const DecodedBase64Segment = packed struct(u24) {
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
 
-    std.debug.print("{s}\n", .{try Base64.encode(a, "hello world!!")});
-    std.debug.print("{s}\n", .{try Base64.decode(a, "aGVsbG8gd29ybGQhIQ==")});
+    std.debug.print("{s}\n", .{try Base64.encode(a, "hello world!!", .default)});
+    std.debug.print("{s}\n", .{try Base64.decode(a, "aGVsbG8gd29ybGQhIQ==", .default)});
 }
 
 // /// Lookup table mapping base64 encoded characters to their decimal representation
@@ -187,23 +200,25 @@ test "base64" {
     const a: Allocator = arena.allocator();
     defer arena.deinit();
 
-    try expectEqual('A', Base64.charAt(0));
-    try expectEqual('a', Base64.charAt(26));
+    const m: Base64.Mode = .default;
 
-    try expectEqual('S', Base64.charAt(18));
-    try expectEqual('G', Base64.charAt(6));
-    try expectEqual('k', Base64.charAt(36));
+    try expectEqual('A', Base64.charAt(0, m));
+    try expectEqual('a', Base64.charAt(26, m));
 
-    try expectEqualStrings("SGk=", try Base64.encode(a, "Hi"));
-    try expectEqualStrings("MA==", try Base64.encode(a, "0"));
+    try expectEqual('S', Base64.charAt(18, m));
+    try expectEqual('G', Base64.charAt(6, m));
+    try expectEqual('k', Base64.charAt(36, m));
 
-    try expectEqual(26, Base64.decodeChar('a'));
-    try expectEqual(0, Base64.decodeChar('A'));
-    try expectEqual(null, Base64.decodeChar('='));
+    try expectEqualStrings("SGk=", try Base64.encode(a, "Hi", m));
+    try expectEqualStrings("MA==", try Base64.encode(a, "0", m));
+
+    try expectEqual(26, Base64.decodeChar('a', m));
+    try expectEqual(0, Base64.decodeChar('A', m));
+    try expectEqual(null, Base64.decodeChar('=', m));
 
     const string = "Hello world!!";
     try expectEqualStrings(
         string,
-        try Base64.decode(a, try Base64.encode(a, string)),
+        try Base64.decode(a, try Base64.encode(a, string, m), m),
     );
 }
